@@ -43,9 +43,9 @@ namespace {
 
 struct config : actor_system_config {
   string host = "localhost";
-  uint16_t port = 0;
-  size_t num_workers = 0;
-  string mode;
+  uint16_t port = 4461;
+  size_t num_workers = 1;
+  string mode = "worker";
   config() {
     opt_group{custom_options_, "global"}
       .add(host, "host,H", "server host (ignored in server mode)")
@@ -71,15 +71,41 @@ void run_server(actor_system& sys, const config& cfg) {
 // Client state, keep track of factors, time, etc.
 struct client_state {
   // The joined group.
+  vector<int512_t> tasks;
+  vector<int512_t> factors;
   group grp;
+  double CPU_Time;
+  int iteration;
+  int busy = 0;
 };
 
 behavior client(stateful_actor<client_state>* self, caf::group grp) {
   // Join group and save it to send messages later.
   self->join(grp);
   self->state.grp = grp;
-  // TODO: Implement me.
-  return {};
+  self->set_default_handler(caf::reflect);
+
+  string input;
+  cout << "Übergib eine zu faktorisierende Zahl: " << endl;
+  std::getline(std::cin, input);
+  int512_t task = boost::lexical_cast<int512_t>(input);
+  // while ganze zahl
+  while (task % 2 == 2) {
+    cout << "ERROR: Wrong Input" << endl
+         << "Übergib eine zu faktorisierende Zahl: " << endl
+         << endl;
+    std::getline(std::cin, input);
+    task = boost::lexical_cast<int512_t>(input);
+  }
+
+  self->state.tasks.push_back(task);
+  self->send(grp, vs::client_asks_worker_atom_v);
+
+  return {[=](vs::worker_asks_client_atom) {
+    std::cout << "CLIENT worker_asks_client_atom\n" << std::endl;
+    self->send(self->state.grp, vs::client_tells_worker_factorize_atom_v, task);
+    return;
+  }};
 }
 
 void run_client(actor_system& sys, const config& cfg) {
@@ -103,17 +129,29 @@ behavior worker(stateful_actor<worker_state>* self, caf::group grp) {
   // Join group and save it to send messages later.
   self->join(grp);
   self->state.grp = grp;
+  self->set_default_handler(caf::reflect);
+
+  self->send(self->state.grp, vs::worker_asks_client_atom_v);
+  return {[=](vs::client_asks_worker_atom) {
+            std::cout << "client_asks_worker_atom\n" << std::endl;
+            self->send(self->state.grp, vs::worker_asks_client_atom_v);
+            return;
+          },
+          [=](vs::client_tells_worker_factorize_atom, const int512_t& task) {
+            std::cout << "client_tells_worker_factorize_atom\n" << std::endl;
+            return;
+          }};
+
   // TODO: Implement me.
   // - Calculate rho.
   // - Check for new messages in between.
-  return {};
 }
 
 void run_worker(actor_system& sys, const config& cfg) {
   if (auto eg = sys.middleman().remote_group("vslab", cfg.host, cfg.port)) {
     auto grp = *eg;
     // TODO: Spawn workers, e.g:
-    // sys.spawn(worker, grp);
+    sys.spawn(worker, grp);
   } else {
     cerr << "error: " << caf::to_string(eg.error()) << '\n';
   }
@@ -124,25 +162,7 @@ void run_worker(actor_system& sys, const config& cfg) {
 
 // dispatches to run_* function depending on selected mode
 void caf_main(actor_system& sys, const config& cfg) {
-  // Check serialization implementation. You can delete this.
-  auto check_roundtrip = [&](int512_t a) {
-    byte_buffer buf;
-    binary_serializer sink{sys, buf};
-    assert(sink.apply(a));
-    binary_deserializer source{sys, buf};
-    int512_t a_copy;
-    assert(source.apply(a_copy));
-    assert(a == a_copy);
-  };
-  check_roundtrip(1234912948123);
-  check_roundtrip(-124);
-
   int512_t n = 1;
-  for (int512_t i = 2; i <= 50; ++i)
-    n *= i;
-  check_roundtrip(n);
-  n *= -1;
-  check_roundtrip(n);
 
   // Dispatch to function based on mode.
   using map_t = unordered_map<string, void (*)(actor_system&, const config&)>;
